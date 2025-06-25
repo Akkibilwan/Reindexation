@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import datetime
 import requests
+import json
 
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
@@ -12,27 +13,33 @@ st.set_page_config(page_title="YouTube Analytics Monitor", layout="wide")
 
 # --- Sidebar Configuration ---
 st.sidebar.header("⚙️ Configuration")
-CHANNEL_ID = st.sidebar.text_input("YouTube Channel ID", help="Your channel's ID, e.g. UC_x5XG1OV2P6uZZ5FSM9Ttw")
-SPREADSHEET_ID = st.sidebar.text_input("Google Sheet ID", help="The ID from your sheet URL")
-SLACK_WEBHOOK_URL = st.sidebar.text_input("Slack Webhook URL", type="password")
-threshold_pct = st.sidebar.slider("Deviation threshold (%)", min_value=0.1, max_value=10.0, value=1.0)
+CHANNEL_ID = st.sidebar.text_input("YouTube Channel ID", value=st.secrets["CHANNEL_ID"], help="Your channel's ID, e.g. UC_x5XG1OV2P6uZZ5FSM9Ttw")
+SPREADSHEET_ID = st.sidebar.text_input("Google Sheet ID", value=st.secrets["SPREADSHEET_ID"], help="The ID from your sheet URL")
+SLACK_WEBHOOK_URL = st.sidebar.text_input("Slack Webhook URL", type="password", value=st.secrets["SLACK_WEBHOOK_URL"])
+threshold_pct = st.sidebar.slider(
+    "Deviation threshold (%)",
+    min_value=0.1,
+    max_value=10.0,
+    value=float(st.secrets["DEVIATION_THRESHOLD"]) * 100,
+    help="Alert if a metric deviates by more than this percentage from its 7-entry average"
+)
 DEVIATION_THRESHOLD = threshold_pct / 100
-YT_CREDS_FILE = st.sidebar.text_input("Path to YouTube SA JSON", "yt_service_account.json")
-SHEETS_CREDS_FILE = st.sidebar.text_input("Path to Sheets SA JSON", "sheets_service_account.json")
 
 # --- Cached Clients ---
-@st.experimental_singleton
+@st.cache_resource
 def get_yt_service():
-    creds = service_account.Credentials.from_service_account_file(
-        YT_CREDS_FILE,
+    creds_info = json.loads(st.secrets["YT_CREDS_JSON"])
+    creds = service_account.Credentials.from_service_account_info(
+        creds_info,
         scopes=["https://www.googleapis.com/auth/yt-analytics.readonly"]
     )
     return build("youtubeAnalytics", "v2", credentials=creds)
 
-@st.experimental_singleton
+@st.cache_resource
 def get_sheets_client():
-    creds = service_account.Credentials.from_service_account_file(
-        SHEETS_CREDS_FILE,
+    creds_info = json.loads(st.secrets["SHEETS_CREDS_JSON"])
+    creds = service_account.Credentials.from_service_account_info(
+        creds_info,
         scopes=["https://www.googleapis.com/auth/spreadsheets"]
     )
     return gspread.authorize(creds)
@@ -59,7 +66,7 @@ def fetch_channel_metrics():
     for day, hour, views, minutes_watched, avg_dur, impressions, ctr in rows:
         ts = datetime.datetime.strptime(f"{day} {hour}", "%Y-%m-%d %H")
         vph = views  # since it's per-hour block
-        engagement_rate = (minutes_watched / (views * avg_dur)) if views else 0
+        engagement_rate = (minutes_watched / (views * avg_dur)) if views and avg_dur else 0
         records.append({
             "timestamp": ts.isoformat(),
             "views": int(views),
