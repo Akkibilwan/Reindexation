@@ -11,39 +11,40 @@ st.set_page_config(page_title="YouTube Analytics Monitor", layout="wide")
 # --- Load & Validate Secrets ---
 secrets = getattr(st, "secrets", {})
 required = [
-    "CHANNEL_ID", "SPREADSHEET_ID", "SLACK_WEBHOOK_URL",
-    "DEVIATION_THRESHOLD", "YT_CREDS_JSON", "SHEETS_CREDS_JSON"
+    "CHANNEL_ID",
+    "SPREADSHEET_ID",
+    "SLACK_WEBHOOK_URL",
+    "DEVIATION_THRESHOLD",
+    "YT_API_KEY",
+    "SHEETS_CREDS_JSON",
 ]
 missing = [k for k in required if not secrets.get(k)]
 if missing:
     st.error(f"Missing secrets: {', '.join(missing)}.\nPlease add them to secrets.toml and redeploy.")
     st.stop()
 
-# --- Config from Secrets ---
+# --- Config ---
 CHANNEL_ID = secrets["CHANNEL_ID"]
 SPREADSHEET_ID = secrets["SPREADSHEET_ID"]
 SLACK_WEBHOOK_URL = secrets["SLACK_WEBHOOK_URL"]
-DEVIATION_THRESHOLD = float(secrets.get("DEVIATION_THRESHOLD", "0.01"))
-YT_CREDS_JSON = secrets["YT_CREDS_JSON"]
+DEVIATION_THRESHOLD = float(secrets["DEVIATION_THRESHOLD"])
+YT_API_KEY = secrets["YT_API_KEY"]
 SHEETS_CREDS_JSON = secrets["SHEETS_CREDS_JSON"]
 
-# --- Init API Clients ---
+# --- Initialize API Clients ---
 @st.cache_resource
 def init_clients():
-    # YouTube Analytics client
-    yt_info = json.loads(YT_CREDS_JSON)
-    yt_creds = service_account.Credentials.from_service_account_info(
-        yt_info,
-        scopes=["https://www.googleapis.com/auth/yt-analytics.readonly"]
+    # YouTube Analytics via API key
+    yt_service = build(
+        "youtubeAnalytics", "v2", developerKey=YT_API_KEY
     )
-    yt_service = build("youtubeAnalytics", "v2", credentials=yt_creds)
-    # Google Sheets client
-    sh_info = json.loads(SHEETS_CREDS_JSON)
-    sh_creds = service_account.Credentials.from_service_account_info(
-        sh_info,
+    # Google Sheets via service account JSON
+    info = json.loads(SHEETS_CREDS_JSON)
+    creds = service_account.Credentials.from_service_account_info(
+        info,
         scopes=["https://www.googleapis.com/auth/spreadsheets"]
     )
-    sheets_client = gspread.authorize(sh_creds)
+    sheets_client = gspread.authorize(creds)
     return yt_service, sheets_client
 
 yt_service, sheets_client = init_clients()
@@ -73,22 +74,21 @@ def fetch_channel_metrics():
             "impressions": int(impressions),
             "ctr": float(ctr),
             "vph": float(vph),
-            "engagement_rate": float(er)
+            "engagement_rate": float(er),
         })
     return pd.DataFrame(data)
 
 # --- Google Sheets Storage ---
-def append_to_sheet(df, ws_name="Channel Metrics"):
+def append_to_sheet(df, worksheet_name="Channel Metrics"):
     sheet = sheets_client.open_by_key(SPREADSHEET_ID)
     try:
-        ws = sheet.worksheet(ws_name)
-    except gspread.WorksheetNotFound:
-        ws = sheet.add_worksheet(title=ws_name, rows="1000", cols="20")
-    rows = df.to_records(index=False)
-    for rec in rows:
+        ws = sheet.worksheet(worksheet_name)
+    except Exception:
+        ws = sheet.add_worksheet(title=worksheet_name, rows="1000", cols="20")
+    for rec in df.to_records(index=False):
         ws.append_row(list(rec))
 
-# --- Deviation Check & Alerting ---
+# --- Deviation Check ---
 def check_deviation(df, metric):
     if len(df) < 8:
         return None
@@ -104,9 +104,12 @@ def check_deviation(df, metric):
 # --- Slack Notification ---
 def send_slack(alerts):
     for msg in alerts:
-        requests.post(SLACK_WEBHOOK_URL, json={"text": f"⚠️ YouTube Analytics Alert:\n{msg}"})
+        requests.post(
+            SLACK_WEBHOOK_URL,
+            json={"text": f"⚠️ YouTube Analytics Alert:\n{msg}"},
+        )
 
-# --- Streamlit UI & Main ---
+# --- Streamlit UI ---
 st.title("📈 YouTube Analytics Monitor")
 if st.button("Run Now"):
     df = fetch_channel_metrics()
@@ -115,7 +118,10 @@ if st.button("Run Now"):
     else:
         st.dataframe(df.tail(5))
         append_to_sheet(df)
-        alerts = [check_deviation(df, m) for m in ["views", "impressions", "ctr", "vph", "engagement_rate"]]
+        alerts = [
+            check_deviation(df, m)
+            for m in ["views", "impressions", "ctr", "vph", "engagement_rate"]
+        ]
         alerts = [a for a in alerts if a]
         if alerts:
             send_slack(alerts)
@@ -124,4 +130,7 @@ if st.button("Run Now"):
             st.success("All metrics within threshold.")
 
 st.markdown("---")
-st.write("This app fetches hourly YouTube metrics, stores them in Google Sheets, and alerts Slack on deviations.")
+st.write(
+    "This app fetches hourly YouTube metrics via API key, stores them in Google Sheets, "
+    "and alerts Slack on deviations."
+)
