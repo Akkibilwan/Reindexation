@@ -1,59 +1,59 @@
 import streamlit as st
 import pandas as pd
-import datetime
-import requests
-import json
-
+import datetime, json, requests
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 import gspread
 
-# --- Streamlit Page Config ---
+# --- Page Config ---
 st.set_page_config(page_title="YouTube Analytics Monitor", layout="wide")
 
-# --- Sidebar Configuration ---
-st.sidebar.header("⚙️ Configuration")
-CHANNEL_ID = st.sidebar.text_input("YouTube Channel ID", value=st.secrets["CHANNEL_ID"], help="Your channel's ID, e.g. UC_x5XG1OV2P6uZZ5FSM9Ttw")
-SPREADSHEET_ID = st.sidebar.text_input("Google Sheet ID", value=st.secrets["SPREADSHEET_ID"], help="The ID from your sheet URL")
-SLACK_WEBHOOK_URL = st.sidebar.text_input("Slack Webhook URL", type="password", value=st.secrets["SLACK_WEBHOOK_URL"])
-threshold_pct = st.sidebar.slider(
-    "Deviation threshold (%)",
-    min_value=0.1,
-    max_value=10.0,
-    value=float(st.secrets["DEVIATION_THRESHOLD"]) * 100,
-    help="Alert if a metric deviates by more than this percentage from its 7-entry average"
-)
-DEVIATION_THRESHOLD = threshold_pct / 100
+# --- Load & Validate Secrets ---
+secrets = getattr(st, "secrets", {})
+required = [
+    "CHANNEL_ID", "SPREADSHEET_ID", "SLACK_WEBHOOK_URL",
+    "DEVIATION_THRESHOLD", "YT_CREDS_JSON", "SHEETS_CREDS_JSON"
+]
+missing = [k for k in required if not secrets.get(k)]
+if missing:
+    st.error(f"Missing secrets: {', '.join(missing)}.\nPlease add them to secrets.toml and redeploy.")
+    st.stop()
 
-# --- Cached Clients ---
+# --- Config from Secrets ---
+CHANNEL_ID = secrets["CHANNEL_ID"]
+SPREADSHEET_ID = secrets["SPREADSHEET_ID"]
+SLACK_WEBHOOK_URL = secrets["SLACK_WEBHOOK_URL"]
+DEVIATION_THRESHOLD = float(secrets.get("DEVIATION_THRESHOLD", "0.01"))
+YT_CREDS_JSON = secrets["YT_CREDS_JSON"]
+SHEETS_CREDS_JSON = secrets["SHEETS_CREDS_JSON"]
+
+# --- Init API Clients ---
 @st.cache_resource
-def get_yt_service():
-    creds_info = json.loads(st.secrets["YT_CREDS_JSON"])
-    creds = service_account.Credentials.from_service_account_info(
-        creds_info,
+def init_clients():
+    # YouTube Analytics client
+    yt_info = json.loads(YT_CREDS_JSON)
+    yt_creds = service_account.Credentials.from_service_account_info(
+        yt_info,
         scopes=["https://www.googleapis.com/auth/yt-analytics.readonly"]
     )
-    return build("youtubeAnalytics", "v2", credentials=creds)
-
-@st.cache_resource
-def get_sheets_client():
-    creds_info = json.loads(st.secrets["SHEETS_CREDS_JSON"])
-    creds = service_account.Credentials.from_service_account_info(
-        creds_info,
+    yt_service = build("youtubeAnalytics", "v2", credentials=yt_creds)
+    # Google Sheets client
+    sh_info = json.loads(SHEETS_CREDS_JSON)
+    sh_creds = service_account.Credentials.from_service_account_info(
+        sh_info,
         scopes=["https://www.googleapis.com/auth/spreadsheets"]
     )
-    return gspread.authorize(creds)
+    sheets_client = gspread.authorize(sh_creds)
+    return yt_service, sheets_client
+
+yt_service, sheets_client = init_clients()
 
 # --- Data Fetching ---
 def fetch_channel_metrics():
-    """
-    Pulls last-hour metrics for the entire channel.
-    Returns a DataFrame with timestamp, views, impressions, ctr, vph, engagement_rate.
-    """
-    yt = get_yt_service()
+    """Fetch last-hour metrics: views, impressions, CTR, VPH, engagement rate."""
     now = datetime.datetime.utcnow()
     start = now - datetime.timedelta(hours=1)
-    response = yt.reports().query(
+    resp = yt_service.reports().query(
         ids=f"channel=={CHANNEL_ID}",
         startDate=start.date().isoformat(),
         endDate=now.date().isoformat(),
@@ -61,89 +61,67 @@ def fetch_channel_metrics():
         dimensions="day,hour",
         sort="day,hour"
     ).execute()
-    rows = response.get("rows", [])
-    records = []
-    for day, hour, views, minutes_watched, avg_dur, impressions, ctr in rows:
+    rows = resp.get("rows", [])
+    data = []
+    for day, hour, views, minutes, avg_dur, impressions, ctr in rows:
         ts = datetime.datetime.strptime(f"{day} {hour}", "%Y-%m-%d %H")
-        vph = views  # since it's per-hour block
-        engagement_rate = (minutes_watched / (views * avg_dur)) if views and avg_dur else 0
-        records.append({
-            "timestamp": ts.isoformat(),
+        vph = views
+        er = (minutes / (views * avg_dur)) if views and avg_dur else 0
+        data.append({
+            "timestamp": ts,
             "views": int(views),
             "impressions": int(impressions),
             "ctr": float(ctr),
             "vph": float(vph),
-            "engagement_rate": float(engagement_rate)
+            "engagement_rate": float(er)
         })
-    return pd.DataFrame(records)
+    return pd.DataFrame(data)
 
 # --- Google Sheets Storage ---
-def append_to_sheet(df: pd.DataFrame, worksheet_name: str):
-    """
-    Appends all rows from df to the given worksheet in the configured spreadsheet.
-    Creates the worksheet if it doesn't exist.
-    """
-    client = get_sheets_client()
-    sheet = client.open_by_key(SPREADSHEET_ID)
+def append_to_sheet(df, ws_name="Channel Metrics"):
+    sheet = sheets_client.open_by_key(SPREADSHEET_ID)
     try:
-        ws = sheet.worksheet(worksheet_name)
+        ws = sheet.worksheet(ws_name)
     except gspread.WorksheetNotFound:
-        ws = sheet.add_worksheet(title=worksheet_name, rows="1000", cols="20")
-    for _, row in df.iterrows():
-        ws.append_row([
-            row["timestamp"], row["views"], row["impressions"],
-            row["ctr"], row["vph"], row["engagement_rate"]
-        ])
+        ws = sheet.add_worksheet(title=ws_name, rows="1000", cols="20")
+    rows = df.to_records(index=False)
+    for rec in rows:
+        ws.append_row(list(rec))
 
-# --- Alert Logic ---
-def check_deviation(df: pd.DataFrame, metric: str):
-    """
-    Returns a Slack-alertable message if the latest metric deviates > threshold from last 7 entries.
-    """
-    if df.shape[0] < 8:
+# --- Deviation Check & Alerting ---
+def check_deviation(df, metric):
+    if len(df) < 8:
         return None
     last = df[metric].iloc[-1]
     avg7 = df[metric].iloc[-8:-1].mean()
     if avg7 == 0:
         return None
-    deviation = abs(last - avg7) / avg7
-    if deviation > DEVIATION_THRESHOLD:
-        return f"*{metric}* deviated by {deviation:.2%} (latest={last:.2f}, avg7={avg7:.2f})"
+    dev = abs(last - avg7) / avg7
+    if dev > DEVIATION_THRESHOLD:
+        return f"*{metric}* deviated by {dev:.2%} (latest={last:.2f}, avg7={avg7:.2f})"
     return None
 
 # --- Slack Notification ---
-def send_slack(messages: list[str]):
-    """
-    Posts each message in `messages` to the configured Slack webhook.
-    """
-    for msg in messages:
-        payload = {"text": f"⚠️ YouTube Analytics Alert:\n{msg}"}
-        requests.post(SLACK_WEBHOOK_URL, json=payload)
+def send_slack(alerts):
+    for msg in alerts:
+        requests.post(SLACK_WEBHOOK_URL, json={"text": f"⚠️ YouTube Analytics Alert:\n{msg}"})
 
-# --- Main Monitor Routine ---
-def run_monitor():
-    st.info("Fetching channel metrics...")
-    df = fetch_channel_metrics()
-    st.write(df.tail(3))
-    append_to_sheet(df, "Channel Metrics")
-    alerts = []
-    for m in ["views", "impressions", "ctr", "vph", "engagement_rate"]:
-        msg = check_deviation(df, m)
-        if msg:
-            alerts.append(msg)
-    if alerts:
-        send_slack(alerts)
-        st.warning(f"Sent {len(alerts)} alert(s) to Slack.")
-    else:
-        st.success("All metrics within threshold.")
-
-# --- Streamlit UI ---
+# --- Streamlit UI & Main ---
 st.title("📈 YouTube Analytics Monitor")
-if st.button("▶️ Run Now"):
-    if not (CHANNEL_ID and SPREADSHEET_ID and SLACK_WEBHOOK_URL):
-        st.error("Please fill in all configuration fields.")
+if st.button("Run Now"):
+    df = fetch_channel_metrics()
+    if df.empty:
+        st.warning("No data returned for the past hour.")
     else:
-        run_monitor()
+        st.dataframe(df.tail(5))
+        append_to_sheet(df)
+        alerts = [check_deviation(df, m) for m in ["views", "impressions", "ctr", "vph", "engagement_rate"]]
+        alerts = [a for a in alerts if a]
+        if alerts:
+            send_slack(alerts)
+            st.warning(f"Sent {len(alerts)} alert(s) to Slack.")
+        else:
+            st.success("All metrics within threshold.")
 
 st.markdown("---")
-st.write("Configure inputs in the sidebar, then click **Run Now** to fetch metrics, store them, and fire alerts if any metric deviates by more than your threshold.")
+st.write("This app fetches hourly YouTube metrics, stores them in Google Sheets, and alerts Slack on deviations.")
