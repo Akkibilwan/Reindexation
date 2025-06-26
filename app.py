@@ -64,18 +64,26 @@ def save_credentials_to_session(credentials):
     }
     st.session_state.credentials = creds_dict
 
+# PASTE THIS ENTIRE FUNCTION, REPLACING THE OLD ONE
+
 def fetch_youtube_data(credentials, channel_id, start_date, end_date):
     """Fetches data from the YouTube Analytics API and returns a DataFrame."""
     try:
         youtube_service = build('youtubeAnalytics', 'v2', credentials=credentials)
+        
+        # --- THIS LINE IS THE FIX ---
+        # We have removed 'impressions' and 'ctr' as they are not compatible 
+        # in the same query with the other metrics.
         request = youtube_service.reports().query(
             ids=f"channel=={channel_id}",
             startDate=start_date.strftime("%Y-%m-%d"),
             endDate=end_date.strftime("%Y-%m-%d"),
-            metrics="views,comments,likes,shares,estimatedMinutesWatched,averageViewDuration,impressions,ctr",
+            metrics="views,comments,likes,shares,estimatedMinutesWatched,averageViewDuration",
             dimensions="day",
             sort="day"
         )
+        # ---------------------------
+
         response = request.execute()
         
         if 'rows' in response:
