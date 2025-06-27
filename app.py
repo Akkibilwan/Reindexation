@@ -63,59 +63,32 @@ def get_accessible_channels(credentials):
         st.error(f"An error occurred while checking accessible channels: {e}")
         return None
 
-def execute_query(youtube_service, channel_id, start_date, end_date, metrics):
-    """A helper function to execute a single YouTube Analytics query."""
-    request = youtube_service.reports().query(
-        ids=f"channel=={channel_id}",
-        startDate=start_date.strftime("%Y-%m-%d"),
-        endDate=end_date.strftime("%Y-%m-%d"),
-        metrics=metrics,
-        dimensions="day",
-        sort="day"
-    )
-    return request.execute()
-
-def response_to_dataframe(response):
-    """Converts an API response to a Pandas DataFrame."""
-    if not response or 'rows' not in response:
-        return pd.DataFrame()
-    column_headers = [header['name'] for header in response['columnHeaders']]
-    return pd.DataFrame(response['rows'], columns=column_headers)
-
 def fetch_youtube_data(credentials, channel_id, start_date, end_date):
-    """Fetches and merges both engagement and reach metrics."""
+    """Fetches a comprehensive set of available engagement metrics."""
     try:
         youtube_service = build('youtubeAnalytics', 'v2', credentials=credentials)
         
-        # --- Step 1: Fetch Core Engagement Metrics ---
-        st.write("Fetching engagement metrics (views, likes, etc.)...")
-        engagement_metrics = "views,redViews,comments,likes,dislikes,shares,estimatedMinutesWatched,averageViewDuration,subscribersGained,subscribersLost"
-        engagement_response = execute_query(youtube_service, channel_id, start_date, end_date, engagement_metrics)
-        engagement_df = response_to_dataframe(engagement_response)
-        
-        # --- Step 2: Fetch Reach Metrics ---
-        st.write("Fetching reach metrics (impressions, CTR)...")
-        reach_metrics = "impressions,ctr"
-        reach_response = execute_query(youtube_service, channel_id, start_date, end_date, reach_metrics)
-        reach_df = response_to_dataframe(reach_response)
-        
-        # --- Step 3: Merge the DataFrames ---
-        st.write("Combining all data...")
-        if not engagement_df.empty and not reach_df.empty:
-            # Merge both dataframes on the 'day' column
-            final_df = pd.merge(engagement_df, reach_df, on='day', how='outer').fillna(0)
-        elif not engagement_df.empty:
-            final_df = engagement_df
-        elif not reach_df.empty:
-            final_df = reach_df
-        else:
-            return pd.DataFrame() # Return empty if both fail
-            
-        return final_df
+        # This is the final, stable list of powerful engagement metrics.
+        request = youtube_service.reports().query(
+            ids=f"channel=={channel_id}",
+            startDate=start_date.strftime("%Y-%m-%d"),
+            endDate=end_date.strftime("%Y-%m-%d"),
+            metrics="views,redViews,comments,likes,dislikes,shares,estimatedMinutesWatched,averageViewDuration,subscribersGained,subscribersLost",
+            dimensions="day",
+            sort="day"
+        )
 
+        response = request.execute()
+        
+        if 'rows' in response:
+            column_headers = [header['name'] for header in response['columnHeaders']]
+            df = pd.DataFrame(response['rows'], columns=column_headers)
+            return df
+        else:
+            return pd.DataFrame()
     except HttpError as e:
         if e.resp.status == 403:
-            st.error(f"🛑 HTTP 403 Forbidden Error: The authenticated user does not have permission for the requested channel ({channel_id}). This is an issue with the channel's permissions on YouTube's side.")
+            st.error(f"🛑 HTTP 403 Forbidden Error: The authenticated user does not have permission for the requested channel ({channel_id}). This is likely an issue with the channel's permissions on YouTube's side.")
         else:
             st.error(f"An error occurred while fetching YouTube data: {e}")
         return None
@@ -141,7 +114,6 @@ creds = get_credentials_from_session()
 if creds is None:
     # --- Authentication Flow ---
     st.header("Step 1: Authenticate with Google")
-    # ... (Authentication UI remains the same)
     flow = Flow.from_client_config(CLIENT_CONFIG, scopes=SCOPES, redirect_uri=st.secrets["REDIRECT_URI"])
     auth_url, _ = flow.authorization_url(prompt='consent')
     st.link_button("Authorize with Google", auth_url, help="You will be redirected to a Google login page.")
@@ -155,7 +127,7 @@ if creds is None:
         except Exception as e:
             st.error(f"Authentication failed: {e}")
 else:
-    # --- Main App Interface (Authenticated) ---
+    # --- Main App Interface ---
     st.success("✅ You are authenticated!")
     
     if 'permission_verified' not in st.session_state:
@@ -178,12 +150,12 @@ else:
     start_date = st.date_input("Select start date", end_date - datetime.timedelta(days=7))
 
     if st.button("Fetch & Update Sheet", type="primary"):
-        with st.spinner("Fetching all YouTube data... This may take a moment."):
+        with st.spinner("Fetching available analytics data..."):
             df = fetch_youtube_data(creds, TARGET_CHANNEL_ID, start_date, end_date)
         
         if df is not None and not df.empty:
             st.balloons()
-            st.write("### Combined Analytics Data")
+            st.write("### Engagement Analytics Data")
             st.dataframe(df)
             
             with st.spinner("Writing data to Google Sheet..."):
