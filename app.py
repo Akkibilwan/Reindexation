@@ -11,11 +11,10 @@ from googleapiclient.errors import HttpError
 st.set_page_config(page_title="YouTube Analytics Verifier", page_icon="✅", layout="wide")
 
 # --- Google API Configuration ---
-# ADDED a new scope for the YouTube Data API v3 to list channels
 SCOPES = [
     "https://www.googleapis.com/auth/yt-analytics.readonly",
     "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/youtube.readonly" 
+    "https://www.googleapis.com/auth/youtube.readonly"
 ]
 
 # --- Secrets Management ---
@@ -31,8 +30,11 @@ try:
             "redirect_uris": [st.secrets["REDIRECT_URI"]]
         }
     }
-    TARGET_CHANNEL_ID = st.secrets["YOUTUBE_CHANNEL_ID"]
-    GOOGLE_SHEET_ID = st.secrets["GOOGLE_SHEET_ID"]
+    # --- THIS IS THE FINAL FIX ---
+    # We add .strip() to remove any accidental invisible spaces from the secret
+    TARGET_CHANNEL_ID = st.secrets["YOUTUBE_CHANNEL_ID"].strip()
+    # ----------------------------
+    GOOGLE_SHEET_ID = st.secrets["GOOGLE_SHEET_ID"].strip()
 except KeyError as e:
     st.error(f"🔴 Critical Error: Missing secret key - {e}. Please configure your secrets.")
     st.stop()
@@ -41,7 +43,7 @@ except KeyError as e:
 if 'credentials' not in st.session_state:
     st.session_state.credentials = None
 
-# --- Helper Functions ---
+# --- Helper Functions (No Changes Below) ---
 def get_credentials_from_session():
     if st.session_state.credentials:
         return Credentials.from_authorized_user_info(st.session_state.credentials)
@@ -54,15 +56,10 @@ def save_credentials_to_session(credentials):
         'client_secret': credentials.client_secret, 'scopes': credentials.scopes
     }
 
-# --- NEW DIAGNOSTIC FUNCTION ---
 def get_accessible_channels(credentials):
-    """Uses the YouTube Data API v3 to list channels accessible by the user."""
     try:
         youtube_service = build('youtube', 'v3', credentials=credentials)
-        request = youtube_service.channels().list(
-            part="snippet",
-            mine=True
-        )
+        request = youtube_service.channels().list(part="snippet", mine=True)
         response = request.execute()
         return response.get("items", [])
     except HttpError as e:
@@ -70,12 +67,10 @@ def get_accessible_channels(credentials):
         return None
 
 def fetch_youtube_data(credentials, channel_id, start_date, end_date):
-    # This function remains the same as before
     try:
         youtube_service = build('youtubeAnalytics', 'v2', credentials=credentials)
         request = youtube_service.reports().query(
-            ids=f"channel=={channel_id}",
-            startDate=start_date.strftime("%Y-%m-%d"),
+            ids=f"channel=={channel_id}", startDate=start_date.strftime("%Y-%m-%d"),
             endDate=end_date.strftime("%Y-%m-%d"),
             metrics="views,comments,likes,shares,estimatedMinutesWatched,averageViewDuration",
             dimensions="day", sort="day"
@@ -88,7 +83,6 @@ def fetch_youtube_data(credentials, channel_id, start_date, end_date):
         else:
             return pd.DataFrame()
     except HttpError as e:
-        # Provide a more helpful error message for 403 errors
         if e.resp.status == 403:
             st.error(f"🛑 HTTP 403 Forbidden Error: The authenticated user does not have permission for the requested channel ({channel_id}). Please check your YouTube Studio permissions.")
         else:
@@ -96,7 +90,6 @@ def fetch_youtube_data(credentials, channel_id, start_date, end_date):
         return None
 
 def write_to_sheet(credentials, sheet_id, dataframe):
-    # This function remains the same
     try:
         gc = gspread.authorize(credentials)
         sheet = gc.open_by_key(sheet_id).sheet1
@@ -109,7 +102,7 @@ def write_to_sheet(credentials, sheet_id, dataframe):
         st.error(f"An error occurred while writing to Google Sheets: {e}")
         return False
 
-# --- Main Application UI ---
+# --- Main Application UI (No Changes Below) ---
 st.title("✅ YouTube Analytics Final Verifier")
 creds = get_credentials_from_session()
 
@@ -136,13 +129,8 @@ else:
     
     if accessible_channels is not None:
         st.write("Your personal account has API access to the following channels:")
-        
-        channel_data = {
-            "Channel Name": [ch['snippet']['title'] for ch in accessible_channels],
-            "Channel ID": [ch['id'] for ch in accessible_channels]
-        }
+        channel_data = {"Channel Name": [ch['snippet']['title'] for ch in accessible_channels], "Channel ID": [ch['id'] for ch in accessible_channels]}
         st.dataframe(pd.DataFrame(channel_data))
-
         st.info(f"**Target Channel ID from your secrets:** `{TARGET_CHANNEL_ID}`")
 
         accessible_ids = [ch['id'] for ch in accessible_channels]
